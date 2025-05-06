@@ -95,4 +95,4 @@ Read the full paper → [paper.pdf](./paper.pdf)
 
 ## 🔗 Links
 
-* 📄 **Post / Presentation:** [link](link)
+* 📄 **Post / Presentation:** [link](https://auradev.hashnode.dev/inegalites-de-genre-et-technologie-ce-que-nous-apprend-leconometrie-spatiale)
