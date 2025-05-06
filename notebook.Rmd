@@ -1,0 +1,600 @@
+---
+title: "The impact of innovation and digital technology on employment in Europe: a spatial econometric analysis"
+author: "Aurel Vehi"
+output:
+   html_document:
+      toc: true
+      toc_float:
+         collapsed: true
+      number_sections: true
+---
+
+# Introduction
+
+In this study, we aim to verify whether:
+
+-   Innovation and digital technology reduce or increase inequalities in the European labor market.
+
+-   High-tech industries benefit women as much as men in terms of employment.
+
+-   There is a geographical divide where some regions benefit from innovation while others do not.
+
+```{r, echo=FALSE}
+rm(list=ls())
+```
+
+### Requirements
+
+```{r eval=FALSE}
+
+```
+
+To access this, we need some R packages, which we load here :
+
+```{r, message=FALSE, warning=FALSE}
+library(sf)
+library(spdep)
+library(spatialreg)
+library(plm)
+library(splm)
+library(sp)
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(lmtest)
+library(corrplot)
+library(modelsummary)
+library(psych)
+library(plm)
+library(gganimate)
+library(transformr)
+library(stargazer)
+library(tidyr)
+```
+
+```{r}
+source("functions.R")
+```
+
+------------------------------------------------------------------------
+
+# Data Preprocessing
+
+The data are downloaded from Eurostat and merged to create this csv file using Python
+
+```{r}
+data <- read.csv('./data.csv')
+head(data)
+```
+
+```{r}
+names(data)
+```
+
+```{r}
+str(data)
+```
+
+The dataset consists of 2630rows and 12 columns, covering regional economic and labor market indicators across different years and geographic locations.
+
+-   `employment_15_64` : Employment rate for individuals aged 15-64 years (percentage).
+
+-   `female_unemp` : Female unemployment rate (percentage)
+
+-   `tech_employment` : Employment in high-tech sectors (percentage)
+
+-   `internet_usage` : Percentage of people regularly using the internet
+
+-   `HRST` : Human resources in science and technology (percentage)
+
+-   `regional_GDP` : Regional Gross Domestic Product (GDP) per capita en K€
+
+-   `higher_edu` : Percentage of individuals aged 25-64 with higher education
+
+-   `pop_density` : Population density
+
+The dataset also contains *regional* and *country-level* information (`Country.Code`, `Code`, `geo`). The variable `year` allows for a panel data analysis over time.
+
+```{r}
+columns <- c('country', 'employment_15_64', 'year')
+for (col in columns) {
+   cat("\n", col, "\n")
+   print(head(unique(data[[col]]), 50))
+}
+```
+
+We can observe that some columns have formatting inconsistencies. Precisely, some variables have `""` as a modality, and R does not consider this as a missing value (`NA`). We need to handle this case.
+
+```{r}
+data[data == ""] <- NA
+
+showNA(data)
+```
+
+Now, we can really observe the `NA` values in each columns. We choose to drop all `NA` values in country_name (also geometry). Next, some numerical variables contain strings, so we must ensure proper data formatting
+
+```{r}
+col_confu <- c('employment_15_64', 'tech_employment', 'HRST', 'regional_GDP', 'pop_density')
+
+for (col in col_confu) {
+   data[[col]] <- as.numeric(gsub("[^0-9.]", "", data[[col]]))
+}
+
+glimpse(data)
+```
+
+Now that our dataset is clean, we can proceed with EDA.
+
+```{r echo=FALSE}
+showNA(data)
+```
+
+```{r, echo=FALSE, message=FALSE}
+attach(data)
+```
+
+------------------------------------------------------------------------
+
+# Explanatory data analysis
+
+## Descriptive statistics
+
+```{r}
+describe(data)
+```
+
+```{r}
+sumy <- data %>%
+   filter(!is.na(country)) %>%
+   group_by(country) %>%
+   summarise(
+      mean_employment = mean(as.numeric(employment_15_64), na.rm = TRUE),
+      median_f_unemp = median(female_unemp, na.rm = TRUE),
+      min_gdp = min(as.numeric(regional_GDP), na.rm = TRUE),
+      mean_gdp = mean(as.numeric(regional_GDP), na.rm = T),
+      sd_internet_usage = sd(internet_usage, na.rm = TRUE)
+      ) %>%
+   arrange(desc(mean_gdp))
+
+print(sumy)
+```
+
+Regional economic and social indicators reveal significant disparities. The employment rate among 15-64 year-olds averages 65%, with many regions falling below 50%, while female unemployment, averaging 11.4%, reaches much higher levels in certain areas. The high-tech sector remains marginal, with an average employment share of 3.4%. Internet usage is widespread, averaging 80%, but some areas still lag far behind (skew \< 0)
+
+Economic inequalities are striking, with regional GDP highly skewed (skew \~4) by a few wealthy regions (FR, DE), pushing the average to nearly 82K, with a huge sd (100K), while the median remains much lower (51K). Higher education attainment varies widely, with some regions well below 15%, limiting their access to skilled labor. Population density shows extreme contrasts, with some areas nearly deserted while others experience intense urban concentration.
+
+Focusing on the wealthiest countries (in term of average regional GDP), we observe : France (FR) has the highest average regional GDP (100K) with an average employment rate of 64% and a median female unemployment rate of 8.5%. Italy (IT) and Germany (DE) have close average GDPs, around 90K, but Italy stands out with a higher employment rate (75%) and lower female unemployment (3.7%). Italy (IT) shows a lower employment rate (59.3%) and higher female unemployment (10.4%)
+
+## Evolution of indicators
+
+```{r, warning=FALSE}
+top20_emp <- data %>%
+   filter(year == 2021) %>%
+   arrange(desc(employment_15_64)) %>%
+   slice_head(n = 20)
+
+ggplot(top20_emp, aes(x = reorder(geo, employment_15_64), y = employment_15_64, fill = country)) +
+   geom_bar(stat = "identity", position = "dodge") +
+   labs(title = "Biggest regional employment rates during covid pandemic",
+        x = "Region (NUTS 2)", y = "Employment rate") +
+   coord_flip() +
+   theme_minimal()
+```
+
+```{r}
+evol_employ_paca <- data %>%
+   filter(geo == 'Provence-Alpes-Côte d’Azur')
+
+ggplot(evol_employ_paca, aes(x = year, y = employment_15_64)) +
+   geom_line(color = 'blue', size=1) +
+   labs(tite = "Evolution of the PACA employment rate of 15-64 year-olds",
+        x = "Year", y = "15-64 year-olds employment rate") +
+   theme_light()
+```
+
+```{r}
+evol_employ_german_reg <- data %>%
+   filter(country == 'FR')
+
+ggplot(evol_employ_german_reg, aes(x = year, y = employment_15_64, color = geo, group= geo)) +
+   geom_line(size=.8) +
+   labs(title = "Evolution of employment rates (15-64 years) in french regions",
+        x = "Year", y = "Employment rate") +
+   geom_text(data = evol_employ_german_reg %>% 
+                group_by(geo) %>% slice_tail(n = 1), 
+             aes(label = geo), hjust = 1, vjust = 0.5, size = 2.5) +
+   theme_light() +
+   theme(legend.position = "none")
+```
+
+```{r}
+femp23 <- data %>%
+   filter(year == 2023)
+
+weak_femp_reg <- femp23 %>%
+   arrange(desc(female_unemp)) %>%
+   slice_head(n = 10) %>%
+   pull(geo)
+
+reg_no_na <- data %>%
+   group_by(geo) %>%
+   filter(all(!is.na(female_unemp))) %>%
+   pull(geo) %>% unique()
+
+evol_f_unempl <- data %>%
+   filter(geo %in% weak_femp_reg & geo %in% reg_no_na)
+
+ggplot(evol_f_unempl, aes(x = year, y = female_unemp, color= geo)) +
+   geom_line(size = .8) +
+   labs(title = "Highest women unemployment rate (in 2023) evolution (top 10 regions)", y = 'Unemeploy rate') +
+   theme_light() +
+   theme()
+   
+```
+
+## Correlation between variables
+
+```{r}
+cor_mat <- data %>% 
+   select(where(is.numeric)) %>%
+   cor(use = "complete.obs")
+corrplot(cor_mat, method = 'color', addCoef.col = "black", tl.cex = 0.7, number.cex = 0.6)
+```
+
+------------------------------------------------------------------------
+
+# Spatial Visualization
+
+```{r message=FALSE, warning=FALSE}
+shp <- st_read("./data/shp/NUTS_RG_20M_2024_3035.shp")
+shp <- shp[shp$LEVL_CODE == 2, ]
+bbox_europe <- st_bbox(c(xmin = -5, xmax = 50, ymin = 0, ymax = 70), crs = st_crs(4326))
+bbox_europe <- st_transform(bbox_europe, 3035)
+shp <- st_crop(shp, bbox_europe)
+print(shp)
+
+ggplot(shp, aes(fill = CNTR_CODE)) + geom_sf() + ggtitle("Map of some countries - NUTS 2")
+```
+
+To assign to each data point a geolocalized coordiantes we merge the shp2 to our dataset `data`
+
+```{r}
+sdata <- shp %>% 
+   select(NAME_LATN, geometry) %>%
+   rename(geo = NAME_LATN) %>%
+   left_join(data, by = "geo")
+```
+
+### Map of employ rate by region (2021)
+
+```{r}
+sdata_21 <- sdata[sdata$year == 2020, ]
+
+ggplot() +
+   geom_sf(data = sdata_21, aes(fill = employment_15_64), color = "white") +
+   scale_fill_viridis_c(option = "magma", name = "Employment rate (%)") +
+   theme_minimal() + labs(title = "Employment rates of 15-64 years by region (2020)") +
+   theme(axis.text = element_blank())
+
+```
+
+### Map of woman unemploy rate by region over 10 years
+
+```{r echo=FALSE}
+sdata_13 <- sdata[sdata$year == 2013, ]
+sdata_23 <- sdata[sdata$year == 2023, ]
+
+ggplot() +
+   geom_sf(data = sdata_13, aes(fill = female_unemp), color = "white") +
+   scale_fill_viridis_c(option = "magma", name = "Unemployment rate (%)") +
+   theme_minimal() + labs(title = "Woman unemployment rates by region (2013)") +
+   theme(axis.text = element_blank())
+
+ggplot() +
+   geom_sf(data = sdata_23, aes(fill = female_unemp), color = "white") +
+   scale_fill_viridis_c(option = "magma", name = "Unemployment rate (%)") +
+   theme_minimal() + labs(title = "Woman unemployment rates by region (2023)") +
+   theme(axis.text = element_blank())
+```
+
+### Map of pop sendity in 2021
+
+```{r}
+ggplot() +
+   geom_sf(data = sdata_21, aes(fill = internet_usage), color = "white") +
+   scale_fill_viridis_c(option = "plasma", name = "Population density") +
+   theme_minimal() + labs(title = "Internet usage by region (2021)") +
+   theme(axis.text = element_blank())
+```
+
+### Map of régional GDP
+
+```{r}
+ggplot() +
+   geom_sf(data = sdata_23, aes(fill = regional_GDP), color = "white") +
+   scale_fill_viridis_c(option = "plasma", name = 'Regional GDP') +
+   theme_minimal() + theme(axis.text = element_blank()) +
+   labs(title = "Regional GDP by Region (2021)")
+```
+
+### Map of Women unemployment in Franceover time
+
+```{r , message=FALSE, warning=FALSE}
+fr_data <- sdata[sdata$country == "FR", ]
+fr_data$year <- as.numeric(as.character(fr_data$year))
+
+p <- ggplot() +
+  geom_sf(data = fr_data, aes(fill = female_unemp), color = "white") +
+  scale_fill_viridis_c(option = "magma", name = "Female Unemployment (%)") +
+  theme_minimal() +
+  labs(title = "Women Unemployment in France", 
+       subtitle = "Year: {closest_state}",
+       x = NULL, y = NULL) +
+  theme(axis.text = element_blank(), axis.ticks = element_blank(), panel.grid = element_blank()) +
+  transition_states(year, transition_length = 1, state_length = 1) +
+  ease_aes("linear")
+
+anim_save("fr_unemployment.gif", animation = p)
+knitr::include_graphics("fr_unemployment.gif")
+```
+
+------------------------------------------------------------------------
+
+# Spatial Econometrics
+
+In this study, we will focus on two main variables :
+
+-   Employment rate for individuals aged 15-64 (total employment)
+
+-   Female unemployment rate (proxy for women’s employment)
+
+To analyze these variables, we will consider several explanatory and control variables.
+
+**Main Explanatory Variables (X)**
+
+-   Employment in high-tech sectors
+
+-   Human resources in science and technology
+
+**Control Variables (Z)**
+
+-   Regional gross domestic product (GDP)
+
+-   Higher education level
+
+-   Population density
+
+These variables will help us understand the factors influencing employment and female unemployment rates.
+
+Our analysis will be based on a spatial panel data, where we will explore spatial dependencies that could explain the variation in these interest variables. This approach will allow us to identify and account for the spatial interactions influencing the employment landscape.
+
+We are going to make our analysis on France only.
+
+```{r}
+pdata <- data %>%
+   select(-internet_usage) %>%
+   filter(country %in% c('FR', 'ES', 'BE', 'IT', 'NL')) %>%
+   mutate(regional_GDP = regional_GDP/1000, log_pop_density = log(pop_density)) %>%
+   drop_na() %>%
+   group_by(id) %>%
+   filter(all(2012:2021 %in% year)) %>%
+   filter(year >= 2012 & year <= 2021) %>%
+   ungroup() %>% 
+   select(id, year, everything())
+
+codes <- pdata$id
+shp_filter <- shp[shp$NUTS_ID %in% codes,]
+
+ggplot(shp_filter, aes(fill = CNTR_CODE)) + geom_sf() + theme_light() + theme(axis.text = element_blank())
+```
+
+```{r}
+vars <- pdata %>%
+   select(employment_15_64, female_unemp, tech_employment, HRST, regional_GDP,
+          higher_edu, pop_density)
+
+stargazer(vars, type = "text", title = "Descriptive stats")
+```
+
+## Weighted matrix
+
+First, to start our analysis we need the spatial weighted matrx. This matrix is based on the queen contiguity methods vu que nous avons des régions administratives.
+
+```{r warning=FALSE}
+nb_queen <- poly2nb(shp_filter, queen = TRUE)
+W <- nb2listw(nb_queen, style = "W", zero.policy = TRUE)  # Normalisation row-standardized
+no_neighbors <- which(card(nb_queen) == 0)
+filtered <- shp_filter[-no_neighbors, ]
+new_codes <- filtered$NUTS_ID
+pdata <- pdata[pdata$id %in% new_codes, ]
+
+nb_queen <- poly2nb(filtered, queen = TRUE)
+W <- spdep::nb2listw(nb_queen, style = "W", zero.policy = TRUE)
+print(W)
+```
+
+```{r, warning=FALSE, echo=FALSE}
+plot(st_geometry(filtered), border="gray")
+plot(nb_queen, st_coordinates(st_centroid(filtered)), add=TRUE, col="blue", pch=20)
+title("Quen contiguity matrix Neighbooring ")
+```
+
+```{r}
+s1 <- as.numeric(summary(card(nb_queen)))  # Distribution du nombre de voisins
+s2 <- as.numeric(summary(unlist(W$weights))) # Dist des poids
+table_summary <- data.frame(
+  Statistic = c("Min.", "1st Qu.", "Median", "Mean", "3rd Qu.", "Max."),
+  NB_Neighboors = s1,
+  Weights = s2
+)
+stargazer(table_summary, type = "text", summary = FALSE, title="Summary of Weight matrix")
+```
+
+We have compute a second matrix based on 5 nearest neighboors to observe ce qui se passe (si on a les mêmes dinaymique etc...
+
+```{r message=FALSE, warning=FALSE}
+map_crd <- st_coordinates(st_centroid(filtered))
+pts <- SpatialPoints(map_crd)
+knn_5 <- knearneigh(pts, k = 5)
+K5_nb <- knn2nb(knn_5)
+W5 <- nb2listw(K5_nb, style="W")
+```
+
+## Econometrics models
+
+First we estimate a Pooled (OLS), FE (within) and RE (GLS) selon cette equation :
+
+```{r warning=FALSE}
+formula <- female_unemp ~ tech_employment + HRST + regional_GDP + higher_edu + pop_density
+
+pdata <- pdata.frame(pdata, index = c('id', 'year'))
+pdim(pdata)
+```
+
+```{r warning=FALSE}
+ols_model <- plm(formula, data = pdata, model = "pooling")
+fe_ind <- plm(formula, data = pdata, model = "within", effect = "individual")
+fe_tim <- plm(formula, data = pdata, model = "within", effect = "time")
+fe_woway <- plm(formula, data = pdata, model = "within", effect = "twoways")
+re_model <- plm(formula, data = pdata, model = "random")
+
+models <- list("Pooled (OLS)" = ols_model, "Individual Fixed effects" = fe_ind, 
+               "Time Fixed effects" = fe_tim, "Twoway Fixed effects" = fe_woway,
+               "Random effects" = re_model)
+
+modelsummary(models, stars = TRUE, gof_map = "all", statistic = "std.error", output = "html")
+```
+
+To select the most appropriate specification, we start from the model without spatial autocorrelation and implement the Hausman test and the Lagrange multiplier tests.
+
+```{r warning=FALSE}
+# BP test
+cat("====== BP Test : OLS vs FE/RE ======")
+plmtest(ols_model, type = "bp")
+
+# Test F
+cat("\n====== F Test : FE vs OLS ======")
+pFtest(fe_ind, ols_model)
+
+# Twoway vs Indiv
+cat("\n===== LR Test : Twoway vs Indiv =====\n")
+lrtest(fe_tim, fe_woway)
+
+# Hausman test (plm)
+cat("\n====== Hausman Test : FE vs RE ======")
+phtest(fe_woway, re_model)
+```
+
+Les tests économétriques indiquent que le modèle OLS est inapproprié en raison de la présence d'effets spécifiques (Breusch-Pagan, p \< 2.2e-16). Le test F montre que les effets fixes individuels sont significatifs (p \< 2.2e-16), et le test F additionnel confirme la nécessité d'un modèle twoway Fixed Effects (p \< 2.2e-16), intégrant à la fois des effets fixes individuels et temporels. Enfin, le tests de Hausman refute l'hypothèse d'effets aléatoires =\> FE est le plus adapté.
+
+## Test for spatial autocorrelation
+
+### Spatial Hausman test
+
+```{r}
+# Hausman test robust to spatial autocorrelation
+cat("\n====== Spatial Hausman Test : FE vs RE - SEM ======")
+sphtest(formula, data =pdata, listw = W, spatial.model = "error", method = "ML")
+
+cat("\n====== Spatial Hausman Test : FE vs RE - SAR ======") 
+sphtest(formula, data =pdata, listw = W, spatial.model = "lag", method = "ML")
+```
+
+Les résultats du test de Hausman spatial montrent que les modèles à effets aléatoires ne sont pas adaptés aux données. Dans les deux spécifications, l’hypothèse selon laquelle les effets aléatoires produisent des estimations cohérentes est rejetée. Cela signifie que les effets fixes sont préférables, car ils prennent mieux en compte l’hétérogénéité non observée entre les unités spatiales =\> Twoway FE better
+
+### LM Tests
+
+```{r}
+slmtest(ols_model, W, test = "lml")
+slmtest(ols_model, W, test = "lme")
+slmtest(ols_model, W, test = "rlml")
+slmtest(ols_model, W, test = "rlme")
+```
+
+```{r}
+slmtest(fe_woway, W, test = "lml")
+slmtest(fe_woway, W, test = "lme")
+slmtest(fe_woway, W, test = "rlml")
+slmtest(fe_woway, W, test = "rlme")
+```
+
+```{r}
+slmtest(fe_ind, W, test = "lml")
+slmtest(fe_ind, W, test = "lme")
+slmtest(fe_ind, W, test = "rlml")
+slmtest(fe_ind, W, test = "rlme")
+```
+
+```{r}
+slmtest(fe_tim, W, test = "lml")
+slmtest(fe_tim, W, test = "lme")
+slmtest(fe_tim, W, test = "rlml")
+slmtest(fe_tim, W, test = "rlme")
+```
+
+```{r}
+slmtest(re_model, W, test = "lml")
+slmtest(re_model, W, test = "lme")
+slmtest(re_model, W, test = "rlml")
+slmtest(re_model, W, test = "rlme")
+```
+
+Les tests indiquent que OLS et RE ne sont pas adaptés : l’hypothèse d’indépendance spatiale est rejetée dans tous les cas. LeFEindividuel capte le mieux la structure des données, car il présente une forte dépendance spatiale dans la variable dépendante et dans les erreurs. Le modèle à effets fixes à deux voies montre également une dépendance dans la variable dépendante, mais pas dans les erreurs, ce qui le rend plus stable.
+
+Le FE Twoway est le plus approprié. Il réduit les biais liés à l’hétérogénéité et ne présente aucune dépendance spatiale dans les erreurs. L’utilisation d’un SAR conviendrait mieux. De plus un SDM serait plausible au cas ou la dependance dans les X
+
+## Spatial Models
+
+```{r}
+pool_model <- spml(formula, data = pdata, listw = W, lag = FALSE,
+                   model = "pooling")
+
+sem_model <- spml(formula, data = pdata, listw = W, spatial.error = "b", 
+                  model = "within", effect = "twoway")
+
+sar_model <- spml(formula, data = pdata, listw = W, lag = TRUE, model = "within",
+                  effect = "twoway", spatial.error ="none")
+
+sar_gmm <- spgm(formula, data = pdata, listw = W, listw2 = W, model = "within",
+                lag = TRUE, spatial.error = FALSE, moments = "fullweights")
+
+sac_model <- spgm(formula, data = pdata, listw = W, listw2 = W, model = "within",
+                  lag = TRUE, spatial.error = TRUE, moments = "fullweights")
+
+models <- list(
+   "Pooled OLS" = pool_model,
+   "SEM FE" = sem_model,
+   "SAR FE" = sar_model,
+   "SAR FE (GMM)" = sar_gmm,
+   "SAC FE" = sac_model
+)
+table <- combine_models(models)
+mod_sumsum(table)
+```
+
+L’objectif de cette étude est d’analyser l’impact de plusieurs variables économiques et démographiques sur le taux de chômage féminin, avec une attention particulière portée aux effets de la technologie représentés par les variables tech_employment et HRST. Plusieurs modèles ont été testés afin d’identifier la meilleure spécification pour capter ces effets tout en tenant compte des interactions spatiales entre les régions.
+
+Un modèle avec effets fixes et une composante spatiale semblait nécessaire. L’inclusion simultanée d’un effet spatial dans la variable dépendante et dans l’erreur a été testée avec le SAC FE. Toutefois, le coefficient associé à l’autocorrélation spatiale des erreurs (rho) n’est pas significatif. La structure d’autocorrélation dans l’erreur n’apporte donc pas d’information supplémentaire. Il est préférable de se concentrer sur un modèle où seule la dépendance spatiale dans la variable dépendante intervient. Le SAR FE apparaît alors comme le plus adapté.
+
+Ce modèle présente un coefficient de lag spatial lambda de 0.4781 (47.81%). Cela signifie que près de 48% du chômage féminin dans une région dépend du chômage observé dans les régions voisines. Concrètement, une augmentation d’un point de pourcentage du chômage dans les régions voisines entraîne une hausse de 0.478 point de pourcentage du chômage féminin local. Cette transmission spatiale est statistiquement significative et confirme l’intérêt d’un modèle spatial plutôt qu’un modèle classique. De plus, la log-vraisemblance du modèle SAR FE est nettement plus élevée que celle des autres modèles, ce qui indique un meilleur ajustement aux données.
+
+L’analyse des coefficients montre qu’une hausse du chômage dans les régions voisines affecte directement le chômage local. Ce résultat confirme l’existence d’effets de diffusion spatiale. Le marché du travail régional fonctionne avec des interdépendances, influencées par la mobilité des travailleurs, les échanges économiques et la concentration géographique des secteurs d’activité. Comme lambda reste inférieur à 1, la transmission spatiale ne suffit pas à expliquer totalement le chômage féminin, ce qui montre que des facteurs locaux continuent de jouer un rôle majeur.
+
+Par ailleurs, tech_employment affiche un coefficient de -0.4891, ce qui signifie qu’une augmentation de 1% de l’emploi technologique réduit le chômage féminin de 0.489 point de pourcentage. Ce résultat suggère que le développement de l’emploi technologique offre de nouvelles opportunités aux femmes, notamment grâce à des conditions de travail plus flexibles et une meilleure inclusion dans certains secteurs. En revanche, HRST affiche un coefficient de -0.4759, ce qui indique qu’une augmentation de 1% du nombre de travailleurs qualifiés en science et technologie entraîne une hausse de 0.476 point de pourcentage du chômage féminin. Ce résultat peut sembler paradoxal. Il s’explique par une intensification de la concurrence sur le marché du travail qui limite l’accès des femmes aux postes les plus spécialisés. Dans certains secteurs, la hausse des qualifications ne bénéficie pas directement aux femmes, notamment lorsque les barrières à l’entrée restent fortes.
+
+## Indirect, direct effects
+
+```{r}
+T <- length(unique(pdata$year))
+impacts_sar <- impacts(sar_model, listw = W, time = T)
+summary(impacts_sar)
+```
+
+Ici, on décompose l’impact des variables explicatives en trois composantes : directe, qui mesure l’effet d’un changement d’une variable dans une région sur le chômage féminin de cette même région, indirecte, qui correspond à l’effet de ce changement sur les régions voisines, et totale, qui représente la somme des deux.
+
+L’emploi technologique (tech_employment) réduit significativement le chômage féminin. Une augmentation de 1% de l’emploi dans le secteur technologique entraîne une baisse de 0.52 point de pourcentage du chômage féminin dans la région et une réduction supplémentaire de 0.41 point de pourcentage dans les régions voisines. L’effet total atteint 0.94 point de pourcentage, ce qui confirme que le secteur technologique favorise l’emploi féminin, non seulement au niveau local, mais aussi dans les territoires adjacents. Ces résultats sont cohérents avec plusieurs études (Autor, Dorn & Hanson, 2015) montrant que l’essor des industries technologiques ouvre des opportunités aux femmes, notamment dans les secteurs du numérique et des services à haute valeur ajoutée . L’augmentation de l’emploi dans les domaines technologique entraîne la création de nouvelles tâches nécessitant des compétences spécifiques, souvent accessibles à des populations jusque-là sous-représentées. Par ailleurs, l’essor du télétravail et des emplois flexibles dans ces secteurs facilite l’insertion des femmes sur le marché du travail (Goldin, 2014).
+
+À l’inverse, HRST a un effet négatif et significatif sur le chômage féminin. Une hausse de 1% du nombre de travailleurs hautement qualifiés en science et technologie entraîne une augmentation de 0.51 point de pourcentage du chômage féminin localement et de 0.40 point de pourcentage dans les régions voisines, avec un impact total de 0.91 point de pourcentage. Ce résultat peut paraître paradoxal. L’accroissement du nombre de travailleurs qualifiés intensifie la concurrence pour les postes à haute valeur ajoutée. Si les inégalités d’accès persistent dans certains secteurs, les femmes risquent d’être exclues des nouvelles opportunités créées par ces dynamiques (Blau & Kahn, 2017). Plusieurs études montrent que les secteurs STEM (Science, Technology, Engineering, Mathematics) restent largement dominés par les hommes, malgré les efforts pour accroître la diversité (Bertrand, 2018). Dans certaines régions, l’augmentation du nombre de travailleurs qualifiés pourrait même aggraver les inégalités, car la demande accrue de compétences spécialisées bénéficie d’abord aux profils déjà bien insérés sur le marché du travail.\
+Les variables de contrôle montrent des effets plus modérés. Une hausse du PIB régional (regional_GDP) a un effet très faible sur le chômage féminin, avec un impact total de 0.005 point de pourcentage, suggérant que la croissance économique seule ne suffit pas à réduire le chômage des femmes. L’éducation supérieure (higher_edu) a un effet plus marqué. Une hausse de 1% du niveau d’éducation supérieur entraîne une réduction de 0.42 point de pourcentage du chômage féminin localement et de 0.33 point de pourcentage dans les régions voisines, pour un effet total de 0.75 point de pourcentage. Cela confirme que l’accès à l’éducation reste un levier essentiel pour améliorer l’insertion professionnelle des femmes. Enfin, la densité de population (pop_density) a un effet négligeable, proche de zéro.
+
+Ces résultats soulignent plusieurs enjeux pour les politiques publiques et les entreprises. Le développement des emplois technologiques doit s’accompagner de mesures favorisant l’accès des femmes à ces secteurs. Les formations en compétences numériques et technologiques doivent être renforcées, avec un accent particulier sur les jeunes filles dès le secondaire. Il est également essentiel d’encourager des politiques d’égalité des chances dans les entreprises technologiques afin de garantir un accès équitable aux postes qualifiés. Concernant la montée en compétences des travailleurs en science et technologie, il est nécessaire de mettre en place des initiatives pour éviter que l’intensification de la concurrence ne se traduise par une exclusion accrue des femmes. Enfin, l’impact limité de la croissance économique sur le chômage féminin montre que des politiques spécifiques sont nécessaires pour cibler les inégalités d’accès à l’emploi, plutôt que de se fier uniquement à la dynamique globale du marché du travail.
