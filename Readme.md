@@ -80,7 +80,7 @@ library(tidyr)
 1. Clone the repository
 
    ```
-   git clone <repository_link>
+   git clone https://github.com/aurvl/SpatialEconometrics.git
    ```
 2. Open `script.R` or `notebook.Rmd` in RStudio
 3. Run the code to reproduce the analysis and results
